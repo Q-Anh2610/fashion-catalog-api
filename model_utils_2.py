@@ -15,7 +15,15 @@ from transformers import BlipForConditionalGeneration, BlipProcessor
 
 
 load_dotenv()
+USE_MOCK_MODEL = os.getenv("USE_MOCK_MODEL", "false").lower() == "true"
 
+_MOCK_CAPTIONS = [
+    "a black cotton dress with a floral pattern",
+    "a blue denim jacket with a solid pattern",
+    "a red silk skirt with a striped pattern",
+    "a white cotton top with a solid pattern",
+    "a grey wool pants with a checked pattern",
+]
 
 def _parse_int_tuple(raw: str) -> Tuple[int, ...]:
     return tuple(int(x.strip()) for x in raw.split(",") if x.strip() != "")
@@ -226,10 +234,17 @@ def _load_model():
     return loaded_model, loaded_processor
 
 
-model, processor = _load_model()
-
+if USE_MOCK_MODEL:
+    print("USE_MOCK_MODEL=true — bỏ qua load BLIP thật, dùng caption giả để test.")
+    model, processor = None, None
+else:
+    model, processor = _load_model()
 
 def generate_caption(image_path):
+    if USE_MOCK_MODEL:
+        import random
+        return random.choice(_MOCK_CAPTIONS)
+
     image = Image.open(image_path).convert("RGB")
     inputs = processor(images=image, return_tensors="pt").to(device)
 
