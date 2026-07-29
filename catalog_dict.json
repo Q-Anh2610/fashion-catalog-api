@@ -1,0 +1,334 @@
+{
+  "category_aliases": {
+    "dress": "dress",
+    "dresses": "dress",
+    "robe": "dress",
+    "robes": "dress",
+    "skirt": "skirt",
+    "skirts": "skirt",
+    "miniskirt": "skirt",
+    "jacket": "jacket",
+    "jackets": "jacket",
+    "blazer": "jacket",
+    "blazers": "jacket",
+    "coat": "jacket",
+    "coats": "jacket",
+    "vest": "jacket",
+    "vests": "jacket",
+    "suit": "jacket",
+    "suits": "jacket",
+    "parka": "jacket",
+    "parkas": "jacket",
+    "pants": "pants",
+    "leggings": "pants",
+    "jeans": "pants",
+    "shorts": "pants",
+    "sweatpants": "pants",
+    "trousers": "pants",
+    "top": "top",
+    "tops": "top",
+    "shirt": "top",
+    "shirts": "top",
+    "blouse": "top",
+    "blouses": "top",
+    "t-shirt": "top",
+    "t-shirts": "top",
+    "tank": "top",
+    "sweater": "top",
+    "sweaters": "top",
+    "turtleneck": "top",
+    "turtlenecks": "top",
+    "sweatshirt": "top",
+    "sweatshirts": "top",
+    "hoodie": "top",
+    "hoodies": "top",
+    "jumpsuit": "dress",
+    "jumpsuits": "dress",
+    "romper": "dress",
+    "rompers": "dress",
+    "cardigan": "top",
+    "cardigans": "top",
+    "tunic": "top",
+    "tunics": "top"
+  },
+  "priority_when_ambiguous": [
+    "dress",
+    "jacket",
+    "skirt",
+    "pants",
+    "top"
+  ],
+  "priority_rules": [
+    "dress",
+    "jacket",
+    "skirt",
+    "pants",
+    "top"
+  ],
+  "attribute_keywords": {
+    "color": [
+      "black",
+      "white",
+      "blue",
+      "red",
+      "green",
+      "silver",
+      "brown",
+      "beige",
+      "pink",
+      "gray",
+      "purple",
+      "gold",
+      "orange",
+      "yellow"
+    ],
+    "material": [
+      "denim",
+      "cotton",
+      "leather",
+      "lace",
+      "polyester",
+      "spandex",
+      "velvet",
+      "fur",
+      "faux",
+      "silk",
+      "stretchy material",
+      "lightweight material",
+      "shiny material",
+      "soft material",
+      "knit",
+      "quilted",
+      "tulle",
+      "stretchy",
+      "lightweight",
+      "shiny",
+      "soft",
+      "blend"
+    ],
+    "pattern": [
+      "polka dot",
+      "floral",
+      "striped",
+      "plain",
+      "check",
+      "print",
+      "pattern"
+    ],
+    "fit": [
+      "loose fit",
+      "fitted",
+      "relaxed fit",
+      "wide",
+      "loose",
+      "relaxed",
+      "cropped",
+      "straight",
+      "pencil"
+    ],
+    "sleeve": [
+      "long sleeves",
+      "short sleeves",
+      "long sleeve",
+      "short sleeve",
+      "sleeveless",
+      "sleeves",
+      "sleeve"
+    ],
+    "neckline": [
+      "halter neckline",
+      "v-neckline",
+      "crew neckline",
+      "strapless",
+      "neckline",
+      "collar",
+      "halter",
+      "round neckline",
+      "rounded"
+    ],
+    "waist": [
+      "high waist",
+      "low waist",
+      "fitted waist",
+      "drawstring",
+      "waistband",
+      "waistline"
+    ],
+    "length": [
+      "knee-length",
+      "mini",
+      "midi",
+      "maxi"
+    ],
+    "closure": [
+      "zipper",
+      "button-down",
+      "button",
+      "buckle",
+      "belt",
+      "closure",
+      "hood"
+    ],
+    "detail": [
+      "pocket",
+      "pockets",
+      "bodice",
+      "flowy",
+      "flowing",
+      "distressed",
+      "pleated",
+      "sheer",
+      "slit",
+      "ruffled",
+      "overlay"
+    ],
+    "style": [
+      "fashionable",
+      "casual",
+      "formal",
+      "feminine",
+      "silhouette"
+    ]
+  },
+  "global_attributes": [
+    "color",
+    "material",
+    "pattern"
+  ],
+  "type_specific_attributes": {
+    "dress": [
+      "neckline",
+      "sleeve",
+      "length",
+      "waist",
+      "closure",
+      "detail",
+      "style"
+    ],
+    "top": [
+      "neckline",
+      "sleeve",
+      "fit",
+      "closure",
+      "detail",
+      "style"
+    ],
+    "skirt": [
+      "length",
+      "waist",
+      "fit",
+      "closure",
+      "detail",
+      "style"
+    ],
+    "pants": [
+      "waist",
+      "fit",
+      "length",
+      "closure",
+      "detail",
+      "style"
+    ],
+    "jacket": [
+      "neckline",
+      "sleeve",
+      "fit",
+      "closure",
+      "detail",
+      "style"
+    ]
+  },
+  "type_attributes": {
+    "dress": [
+      "color",
+      "material",
+      "pattern",
+      "neckline",
+      "sleeve",
+      "length",
+      "waist",
+      "closure",
+      "detail",
+      "style"
+    ],
+    "top": [
+      "color",
+      "material",
+      "pattern",
+      "neckline",
+      "sleeve",
+      "fit",
+      "closure",
+      "detail",
+      "style"
+    ],
+    "skirt": [
+      "color",
+      "material",
+      "pattern",
+      "length",
+      "waist",
+      "fit",
+      "closure",
+      "detail",
+      "style"
+    ],
+    "pants": [
+      "color",
+      "material",
+      "pattern",
+      "waist",
+      "fit",
+      "length",
+      "closure",
+      "detail",
+      "style"
+    ],
+    "jacket": [
+      "color",
+      "material",
+      "pattern",
+      "neckline",
+      "sleeve",
+      "fit",
+      "closure",
+      "detail",
+      "style"
+    ]
+  },
+  "comparison_patterns": [
+    "\\b(?:styled|looks?|dressed)\\s+like\\s+(?:a|an)\\s+\\w+",
+    "\\blike\\s+(?:a|an)\\s+\\w+",
+    "\\bsimilar\\s+to\\s+(?:a|an)\\s+\\w+",
+    "\\bresembl(?:es|ing)\\s+(?:a|an)\\s+\\w+",
+    "\\bas\\s+if\\s+it\\s+(?:were|was)\\s+(?:a|an)\\s+\\w+"
+  ],
+  "verb_dress_patterns": [
+    "\\bto\\s+dress\\b",
+    "\\bdress(?:es|ed|ing)?\\s+(?:up|down|casually|formally|smartly|well|nicely)\\b",
+    "\\bdress\\s+code\\b"
+  ],
+  "vague_material_words": [
+    "fabric",
+    "material",
+    "type of fabric"
+  ],
+  "vague_pattern_words": [
+    "pattern",
+    "print"
+  ],
+  "vague_style_words": [
+    "silhouette"
+  ],
+  "generic_material_descriptors": [
+    "soft",
+    "stretchy",
+    "lightweight",
+    "shiny",
+    "blend",
+    "soft material",
+    "stretchy material",
+    "lightweight material",
+    "shiny material"
+  ]
+}

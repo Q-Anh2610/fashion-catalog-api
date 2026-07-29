@@ -1,0 +1,10 @@
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch
+gradio
+fastapi
+uvicorn[standard]
+python-multipart
+transformers
+pillow
+supabase
+python-dotenv
