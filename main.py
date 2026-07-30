@@ -160,6 +160,21 @@ def _target_codes(db_parser: dict[str, Any]) -> dict[str, str]:
     }
 
 
+def _code_to_name(code: Optional[str], code_col: str, name_col: str) -> str:
+    """
+    SỬA #6: chuyển code (A/B/C/D...) thành tên hiển thị (VD "Đen", "Cotton")
+    bằng cách tái dùng map_value_to_code() theo chiều ngược: match theo cột
+    code, trả về cột tên.
+    """
+    if not code or code == "X":
+        return ""
+    try:
+        name = map_value_to_code(code, code_col, name_col, name_col)
+        return name if name and name != "X" else code
+    except Exception:
+        return code
+
+
 def _product_to_json(product: dict, score=None) -> dict:
     cls_rows = product.get("classification_results") or []
     cls = cls_rows[0] if isinstance(cls_rows, list) and cls_rows else {}
@@ -168,16 +183,36 @@ def _product_to_json(product: dict, score=None) -> dict:
     if isinstance(caption_rows, list) and caption_rows:
         caption = caption_rows[0].get("caption_text", "")
 
+    type_code = cls.get("type_code", "")
+    color_code = cls.get("color_code", "")
+    material_code = cls.get("material_code", "")
+    pattern_code = cls.get("pattern_code", "")
+
+    # SỬA #6 (tiếp): các thuộc tính riêng theo từng type (VD "sleeve_length"
+    # cho áo, "waist_type" cho quần...) — GIẢ ĐỊNH classification_results có
+    # cột JSON "extra_attributes" lưu type-specific attributes lúc classify.
+    # Nếu cột này chưa tồn tại trong DB thật của bạn, phần này sẽ luôn trả
+    # {} (không lỗi) — cần thêm cột đó + lưu vào lúc classify_and_update_product
+    # để mục này có dữ liệu thật.
+    extra_attributes = cls.get("extra_attributes") or {}
+    if not isinstance(extra_attributes, dict):
+        extra_attributes = {}
+
     return {
         "match_score": score,
         "product_code": product.get("product_code", ""),
         "product_id": product.get("product_id"),
         "price": product.get("price"),
         "caption": caption,
-        "type_code": cls.get("type_code", ""),
-        "color_code": cls.get("color_code", ""),
-        "material_code": cls.get("material_code", ""),
-        "pattern_code": cls.get("pattern_code", ""),
+        "type_code": type_code,
+        "type_name": _code_to_name(type_code, "type_code", "type_name"),
+        "color_code": color_code,
+        "color_name": _code_to_name(color_code, "color_code", "color_name"),
+        "material_code": material_code,
+        "material_name": _code_to_name(material_code, "material_code", "material_name"),
+        "pattern_code": pattern_code,
+        "pattern_name": _code_to_name(pattern_code, "pattern_code", "pattern_name"),
+        "extra_attributes": extra_attributes,
         "image_path": _public_image_url(product.get("image_path", "")),
     }
 
@@ -488,12 +523,44 @@ def api_seller_list_products(seller=Depends(get_seller_client)):
 class SellerCorrectionRequest(BaseModel):
     result_id: int
     corrected_category: str
+    # SỬA #3 (theo yêu cầu): cho phép sửa cả màu/chất liệu/họa tiết,
+    # không chỉ riêng type như trước.
+    corrected_color: Optional[str] = None
+    corrected_material: Optional[str] = None
+    corrected_pattern: Optional[str] = None
 
 
 @app.post("/seller/corrections")
 def api_seller_submit_correction(payload: SellerCorrectionRequest, seller=Depends(get_seller_client)):
     client, _seller_id = seller
+    # Giữ nguyên hành vi cũ cho category/type (có thể có side-effect logging
+    # riêng bên trong submit_seller_correction mà main.py không biết tới).
     submit_seller_correction(client, payload.result_id, payload.corrected_category)
+
+    # Với color/material/pattern: convert tên hiển thị -> code rồi update
+    # thẳng vào classification_results, vì submit_seller_correction hiện tại
+    # chỉ nhận corrected_category.
+    extra_updates = {}
+    if payload.corrected_color:
+        code = map_value_to_code(payload.corrected_color, "color_code", "color_name", "color_code")
+        if code and code != "X":
+            extra_updates["color_code"] = code
+    if payload.corrected_material:
+        code = map_value_to_code(payload.corrected_material, "material_code", "material_name", "material_code")
+        if code and code != "X":
+            extra_updates["material_code"] = code
+    if payload.corrected_pattern:
+        code = map_value_to_code(payload.corrected_pattern, "pattern_code", "pattern_name", "pattern_code")
+        if code and code != "X":
+            extra_updates["pattern_code"] = code
+
+    if extra_updates:
+        # Giả định cột khóa chính của classification_results là "result_id"
+        # (khớp với _get_result_id ở trên) — đổi lại nếu schema thật khác.
+        client.table("classification_results").update(extra_updates).eq(
+            "result_id", payload.result_id
+        ).execute()
+
     return {"status": "ok"}
 
 
