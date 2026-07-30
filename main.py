@@ -54,6 +54,10 @@ app.add_middleware(
 TYPE_CHOICES = ["dress", "jacket", "skirt", "pants", "top"]
 SIMILARITY_DIMENSIONS = ["type", "color", "material", "pattern"]
 
+# Tên bucket Supabase Storage nơi ảnh sản phẩm được lưu (theo đúng thông báo
+# "Đã lưu sản phẩm vào storage `product-images`" ở bản Gradio demo).
+PRODUCT_IMAGE_BUCKET = "product-images"
+
 
 # ---------------------------------------------------------------------------
 # Helpers — port nguyên logic từ app.py, chỉ đổi input từ gr.Image/gr.File
@@ -174,7 +178,7 @@ def _product_to_json(product: dict, score=None) -> dict:
         "color_code": cls.get("color_code", ""),
         "material_code": cls.get("material_code", ""),
         "pattern_code": cls.get("pattern_code", ""),
-        "image_path": product.get("image_path", ""),
+        "image_path": _public_image_url(product.get("image_path", "")),
     }
 
 
@@ -182,6 +186,63 @@ def _random_price() -> int:
     """Random giá trong khoảng 100_000 - 500_000, luôn là bội số của 1000 (3 số cuối = 000)."""
     import random
     return random.randrange(100_000, 500_001, 1_000)
+
+
+def _public_image_url(image_path: Optional[str]) -> str:
+    """
+    SỬA #1: `product.image_path` lưu trong DB là path tương đối bên trong bucket
+    Supabase Storage (VD "sellers/abc123.jpg"), Flutter không thể Image.network()
+    trực tiếp path đó. Hàm này build ra full public URL để frontend chỉ việc
+    hiển thị thẳng, không cần tự ghép domain nữa.
+
+    Yêu cầu: bucket PRODUCT_IMAGE_BUCKET ("product-images") phải để ở chế độ
+    Public trên Supabase Storage (Storage > product-images > Settings > Public bucket).
+    Nếu bucket đang Private, cần đổi sang create_signed_url(...) thay vì
+    get_public_url(...) — báo mình biết nếu đúng trường hợp này để đổi lại.
+    """
+    if not image_path:
+        return ""
+    if image_path.startswith("http://") or image_path.startswith("https://"):
+        return image_path  # đã là URL đầy đủ sẵn, không cần xử lý thêm
+    try:
+        result = supabase.storage.from_(PRODUCT_IMAGE_BUCKET).get_public_url(image_path)
+        # supabase-py có thể trả str hoặc dict tùy version, chuẩn hóa lại
+        if isinstance(result, dict):
+            return result.get("publicUrl") or result.get("public_url") or ""
+        return result or ""
+    except Exception:
+        return ""
+
+
+def _get_result_id(client, caption_id) -> Optional[int]:
+    """
+    SỬA #2: POST /seller/corrections cần `result_id` (khóa chính của bảng
+    classification_results) để biết sửa đúng dòng nào, nhưng
+    classify_and_update_product() trước đây chỉ trả về `product_code`.
+
+    Hàm này query lại classification_results theo `caption_id` vừa tạo để lấy
+    id của chính dòng phân loại đó, ngay sau khi classify_and_update_product
+    chạy xong.
+
+    Giả định: bảng classification_results có cột khóa chính tên "result_id"
+    và cột "caption_id" liên kết tới caption vừa lưu — đúng với tên tham số
+    `result_id` đã dùng ở SellerCorrectionRequest. Nếu tên cột khóa chính thực
+    tế trong Supabase khác (VD chỉ là "id"), đổi "result_id" bên dưới cho khớp
+    schema thật của bạn.
+    """
+    try:
+        res = (
+            client.table("classification_results")
+            .select("result_id")
+            .eq("caption_id", caption_id)
+            .order("result_id", desc=True)
+            .limit(1)
+            .execute()
+        )
+        rows = res.data or []
+        return rows[0]["result_id"] if rows else None
+    except Exception:
+        return None
 
 
 def _search_products_by_image_soft(image_path, generated_caption, db_parser, dimensions, device_id):
@@ -283,6 +344,28 @@ class BuyerTextSearchRequest(BaseModel):
     material: Optional[str] = None
     pattern: Optional[str] = None
     device_id: Optional[str] = None  # Flutter tự sinh 1 uuid/local, giữ ổn định giữa các lần gọi
+    # SỬA #3: khoảng giá — filter được áp dụng ở tầng main.py (sau khi lấy rows
+    # từ search_products_by_text), vì hàm đó hiện chỉ nhận filter theo code
+    # (type/color/material/pattern), không có tham số giá.
+    price_min: Optional[int] = None
+    price_max: Optional[int] = None
+
+
+def _apply_price_filter(rows: list[dict], price_min: Optional[int], price_max: Optional[int]) -> list[dict]:
+    if price_min is None and price_max is None:
+        return rows
+    filtered = []
+    for row in rows:
+        price = row.get("price")
+        if price is None:
+            filtered.append(row)  # không rõ giá thì không loại, tránh mất sản phẩm hợp lệ
+            continue
+        if price_min is not None and price < price_min:
+            continue
+        if price_max is not None and price > price_max:
+            continue
+        filtered.append(row)
+    return filtered
 
 
 # ---------------------------------------------------------------------------
@@ -334,10 +417,12 @@ def api_seller_upload_single(
         )
         caption_id = save_caption(client, product_id, caption)
         product_code = classify_and_update_product(client, product_id, caption_id, db_parser)
+        result_id = _get_result_id(client, caption_id)
 
         return {
             "product_code": product_code,
             "product_id": product_id,
+            "result_id": result_id,
             "caption": caption,
             "type": db_parser["type"],
             "attributes": _display_attributes(db_parser),
@@ -371,9 +456,11 @@ def api_seller_upload_batch(
             )
             caption_id = save_caption(client, product_id, caption)
             product_code = classify_and_update_product(client, product_id, caption_id, db_parser)
+            result_id = _get_result_id(client, caption_id)
             results.append({
                 "product_code": product_code,
                 "product_id": product_id,
+                "result_id": result_id,
                 "caption": caption,
                 "type": db_parser["type"],
                 "attributes": _display_attributes(db_parser),
@@ -382,7 +469,7 @@ def api_seller_upload_batch(
             ok_count += 1
         except Exception as exc:
             results.append({
-                "product_code": None, "product_id": None, "caption": None,
+                "product_code": None, "product_id": None, "result_id": None, "caption": None,
                 "type": None, "attributes": None, "status": f"failed: {exc}",
             })
         finally:
@@ -423,6 +510,7 @@ def api_buyer_search_text(payload: BuyerTextSearchRequest):
         query_text=(payload.query or "").strip(),
         filters=filters,
     )
+    rows = _apply_price_filter(rows, payload.price_min, payload.price_max)
     return {
         "device_id": device_id,
         "count": len(rows),
@@ -435,6 +523,8 @@ def api_buyer_search_image(
     file: UploadFile = File(...),
     dimensions: list[str] = Form(default=SIMILARITY_DIMENSIONS),
     device_id: Optional[str] = Form(None),
+    price_min: Optional[int] = Form(None),  # SỬA #3
+    price_max: Optional[int] = Form(None),  # SỬA #3
 ):
     device_id = device_id or str(uuid.uuid4())
     image_path = _save_upload_to_tmp(file)
@@ -447,6 +537,7 @@ def api_buyer_search_image(
             dimensions=dimensions,
             device_id=device_id,
         )
+        products = _apply_price_filter(products, price_min, price_max)
         return {
             "device_id": device_id,
             "query_caption": caption,
