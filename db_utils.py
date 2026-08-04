@@ -16,16 +16,27 @@ supabase = create_client(SUPABASE_URL, SUPABASE_KEY)  # client mặc định, d�
 # PHẦN DÙNG CHUNG — Mã hoá sản phẩm (product_code)
 # ======================================================================
 
-def map_value_to_code(value: str, codebook_table: str, name_column: str, code_column: str) -> str:
+_codebook_cache: dict[str, dict[str, str]] = {}
+
+def load_codebook_cache():
+    """Gọi 1 lần lúc app khởi động. Load toàn bộ attribute_code vào RAM,
+    nhóm theo code_type để tra cứu O(1) thay vì query DB mỗi lần."""
+    res = supabase.table("attribute_code").select("code_type, code, name").execute()
+    cache: dict[str, dict[str, str]] = {"type": {}, "color": {}, "material": {}, "pattern": {}}
+    for row in res.data:
+        cache[row["code_type"]][row["name"]] = row["code"]
+    _codebook_cache.clear()
+    _codebook_cache.update(cache)
+
+def map_value_to_code(value: str, code_type: str) -> str:
     """
-    Tra bảng codebook (type_code/color_code/material_code/pattern_code),
+    Tra codebook (đã cache trong RAM) theo code_type ('type'/'color'/'material'/'pattern'),
     map giá trị text (VD: "black") -> mã 1 ký tự (VD: "B").
-    Trả về "X" nếu value rỗng hoặc không tìm thấy trong codebook.
+    Trả về "X" nếu value rỗng hoặc không tìm thấy.
     """
     if not value:
         return "X"
-    res = supabase.table(codebook_table).select(code_column).eq(name_column, value).limit(1).execute()
-    return res.data[0][code_column] if res.data else "X"
+    return _codebook_cache.get(code_type, {}).get(value, "X")
 
 
 def get_next_sequence_number(type_code: str, color_code: str, material_code: str, pattern_code: str) -> int:
@@ -44,13 +55,12 @@ def get_next_sequence_number(type_code: str, color_code: str, material_code: str
 
 
 def map_codes_only(parser_result: dict) -> dict:
-    """Chỉ map 4 giá trị sang code, không tính sequence number."""
     global_attrs = parser_result["attributes"]["global"]
     return {
-        "type_code": map_value_to_code(parser_result["type"], "type_code", "type_name", "type_code"),
-        "color_code": map_value_to_code(global_attrs.get("color"), "color_code", "color_name", "color_code"),
-        "material_code": map_value_to_code(global_attrs.get("material"), "material_code", "material_name", "material_code"),
-        "pattern_code": map_value_to_code(global_attrs.get("pattern"), "pattern_code", "pattern_name", "pattern_code"),
+        "type_code": map_value_to_code(parser_result["type"], "type"),
+        "color_code": map_value_to_code(global_attrs.get("color"), "color"),
+        "material_code": map_value_to_code(global_attrs.get("material"), "material"),
+        "pattern_code": map_value_to_code(global_attrs.get("pattern"), "pattern"),
     }
 
 
@@ -99,11 +109,12 @@ def create_pending_products_batch(seller_client, seller_id: str, image_local_pat
     return product_ids
 
 
-def save_caption(seller_client, product_id: int, caption_text: str) -> int:
-    """Bước 2: lưu caption model sinh ra, gắn với product_id đã tạo."""
+def save_caption(seller_client, product_id: int, caption_text: str, caption_source: str = "manual") -> int:
+    """Lưu caption do người bán tự nhập (hoặc gợi ý AI đã chỉnh sửa), gắn với product_id đã tạo."""
     res = seller_client.table("caption").insert({
         "product_id": product_id,
         "caption_text": caption_text,
+        "caption_source": caption_source,
     }).execute()
     return res.data[0]["caption_id"]
 
@@ -132,10 +143,10 @@ def classify_and_update_product(seller_client, product_id: int, caption_id: int,
     if item_type != "unknown":
         table_name = f"attribute_{item_type}"
         specific_attrs = parser_result["attributes"]["type_specific"]
-        seller_client.table(table_name).insert({
+        seller_client.table(table_name).upsert({
             "product_id": product_id,
             **specific_attrs,
-        }).execute()
+        }).on_conflict="product_id".execute()
 
     # UPDATE product với product_code, đổi status
     seller_client.table("product").update({
@@ -154,14 +165,6 @@ def get_seller_products(seller_client, seller_id: str):
         .order("uploaded_at", desc=True) \
         .execute()
     return res.data
-
-
-def submit_seller_correction(seller_client, result_id: int, corrected_category: str):
-    """Người bán tự sửa category nếu parser gán sai."""
-    seller_client.table("seller_correction").insert({
-        "result_id": result_id,
-        "corrected_category": corrected_category,
-    }).execute()
 
 
 # ======================================================================
