@@ -7,10 +7,13 @@ Chạy local:
 Swagger docs tự sinh tại: http://localhost:8000/docs
 """
 
+import io
 import os
 import shutil
 import tempfile
 import uuid
+import json as json_lib
+import pandas as pd
 from typing import Any, Optional
 
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Depends
@@ -25,6 +28,7 @@ from classify_utils import (
     parse_caption,
 )
 from db_utils import (
+    load_codebook_cache,
     classify_and_update_product,
     create_pending_product,
     ensure_device_exists,
@@ -32,7 +36,6 @@ from db_utils import (
     map_value_to_code,
     save_caption,
     search_products_by_text,
-    submit_seller_correction,
     supabase,
 )
 from model_utils_2 import generate_caption
@@ -50,6 +53,11 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.on_event("startup")
+def startup_event():
+    load_codebook_cache()
+    
 
 TYPE_CHOICES = ["dress", "jacket", "skirt", "pants", "top"]
 SIMILARITY_DIMENSIONS = ["type", "color", "material", "pattern"]
@@ -130,50 +138,48 @@ def _parse_image(image_path: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
     db_parser = _format_parser_for_db(parsed)
     return caption, parsed, db_parser
 
+def _parse_caption(image_id: str, caption_text: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Chỉ chạy parser trên caption đã có sẵn (không gọi model) — dùng cho luồng seller."""
+    parsed = parse_caption(
+        image_id=image_id,
+        caption=caption_text,
+        return_diagnostic=True,
+        return_attributes=True,
+    )
+    db_parser = _format_parser_for_db(parsed)
+    return parsed, db_parser
+
+
+MIN_CAPTION_WORDS = 5
+
+def _validate_caption(caption: Optional[str]) -> str:
+    caption = (caption or "").strip()
+    if len(caption.split()) < MIN_CAPTION_WORDS:
+        raise HTTPException(
+            400, f"Caption is too short (minimum {MIN_CAPTION_WORDS} words) for accurate classification."
+        )
+    return caption
 
 def _code_filters(type_filter, color_filter, material_filter, pattern_filter):
     filters = {}
     if type_filter:
-        filters["type_code"] = map_value_to_code(type_filter, "type_code", "type_name", "type_code")
+        filters["type_code"] = map_value_to_code(type_filter, "type")
     if color_filter:
-        filters["color_code"] = map_value_to_code(color_filter, "color_code", "color_name", "color_code")
+        filters["color_code"] = map_value_to_code(color_filter, "color")
     if material_filter:
-        filters["material_code"] = map_value_to_code(
-            material_filter, "material_code", "material_name", "material_code",
-        )
+        filters["material_code"] = map_value_to_code(material_filter, "material")
     if pattern_filter:
-        filters["pattern_code"] = map_value_to_code(
-            pattern_filter, "pattern_code", "pattern_name", "pattern_code",
-        )
+        filters["pattern_code"] = map_value_to_code(pattern_filter, "pattern")
     return {key: value for key, value in filters.items() if value and value != "X"}
-
 
 def _target_codes(db_parser: dict[str, Any]) -> dict[str, str]:
     global_attrs = db_parser["attributes"]["global"]
     return {
-        "type_code": map_value_to_code(db_parser["type"], "type_code", "type_name", "type_code"),
-        "color_code": map_value_to_code(global_attrs.get("color"), "color_code", "color_name", "color_code"),
-        "material_code": map_value_to_code(
-            global_attrs.get("material"), "material_code", "material_name", "material_code",
-        ),
-        "pattern_code": map_value_to_code(global_attrs.get("pattern"), "pattern_code", "pattern_name", "pattern_code"),
+        "type_code": map_value_to_code(db_parser["type"], "type"),
+        "color_code": map_value_to_code(global_attrs.get("color"), "color"),
+        "material_code": map_value_to_code(global_attrs.get("material"), "material"),
+        "pattern_code": map_value_to_code(global_attrs.get("pattern"), "pattern"),
     }
-
-
-def _code_to_name(code: Optional[str], code_col: str, name_col: str) -> str:
-    """
-    SỬA #6: chuyển code (A/B/C/D...) thành tên hiển thị (VD "Đen", "Cotton")
-    bằng cách tái dùng map_value_to_code() theo chiều ngược: match theo cột
-    code, trả về cột tên.
-    """
-    if not code or code == "X":
-        return ""
-    try:
-        name = map_value_to_code(code, code_col, name_col, name_col)
-        return name if name and name != "X" else code
-    except Exception:
-        return code
-
 
 def _product_to_json(product: dict, score=None) -> dict:
     cls_rows = product.get("classification_results") or []
@@ -183,36 +189,16 @@ def _product_to_json(product: dict, score=None) -> dict:
     if isinstance(caption_rows, list) and caption_rows:
         caption = caption_rows[0].get("caption_text", "")
 
-    type_code = cls.get("type_code", "")
-    color_code = cls.get("color_code", "")
-    material_code = cls.get("material_code", "")
-    pattern_code = cls.get("pattern_code", "")
-
-    # SỬA #6 (tiếp): các thuộc tính riêng theo từng type (VD "sleeve_length"
-    # cho áo, "waist_type" cho quần...) — GIẢ ĐỊNH classification_results có
-    # cột JSON "extra_attributes" lưu type-specific attributes lúc classify.
-    # Nếu cột này chưa tồn tại trong DB thật của bạn, phần này sẽ luôn trả
-    # {} (không lỗi) — cần thêm cột đó + lưu vào lúc classify_and_update_product
-    # để mục này có dữ liệu thật.
-    extra_attributes = cls.get("extra_attributes") or {}
-    if not isinstance(extra_attributes, dict):
-        extra_attributes = {}
-
     return {
         "match_score": score,
         "product_code": product.get("product_code", ""),
         "product_id": product.get("product_id"),
         "price": product.get("price"),
         "caption": caption,
-        "type_code": type_code,
-        "type_name": _code_to_name(type_code, "type_code", "type_name"),
-        "color_code": color_code,
-        "color_name": _code_to_name(color_code, "color_code", "color_name"),
-        "material_code": material_code,
-        "material_name": _code_to_name(material_code, "material_code", "material_name"),
-        "pattern_code": pattern_code,
-        "pattern_name": _code_to_name(pattern_code, "pattern_code", "pattern_name"),
-        "extra_attributes": extra_attributes,
+        "type_code": cls.get("type_code", ""),
+        "color_code": cls.get("color_code", ""),
+        "material_code": cls.get("material_code", ""),
+        "pattern_code": cls.get("pattern_code", ""),
         "image_path": _public_image_url(product.get("image_path", "")),
     }
 
@@ -251,19 +237,8 @@ def _public_image_url(image_path: Optional[str]) -> str:
 
 def _get_result_id(client, caption_id) -> Optional[int]:
     """
-    SỬA #2: POST /seller/corrections cần `result_id` (khóa chính của bảng
-    classification_results) để biết sửa đúng dòng nào, nhưng
-    classify_and_update_product() trước đây chỉ trả về `product_code`.
-
-    Hàm này query lại classification_results theo `caption_id` vừa tạo để lấy
-    id của chính dòng phân loại đó, ngay sau khi classify_and_update_product
-    chạy xong.
-
-    Giả định: bảng classification_results có cột khóa chính tên "result_id"
-    và cột "caption_id" liên kết tới caption vừa lưu — đúng với tên tham số
-    `result_id` đã dùng ở SellerCorrectionRequest. Nếu tên cột khóa chính thực
-    tế trong Supabase khác (VD chỉ là "id"), đổi "result_id" bên dưới cho khớp
-    schema thật của bạn.
+    Query lại classification_results theo caption_id vừa tạo để lấy result_id
+    của dòng phân loại tương ứng, trả về cho frontend hiển thị/debug.
     """
     try:
         res = (
@@ -385,6 +360,8 @@ class BuyerTextSearchRequest(BaseModel):
     price_min: Optional[int] = None
     price_max: Optional[int] = None
 
+class SellerRecaptionRequest(BaseModel):
+    caption: str
 
 def _apply_price_filter(rows: list[dict], price_min: Optional[int], price_max: Optional[int]) -> list[dict]:
     if price_min is None and price_max is None:
@@ -435,6 +412,7 @@ def api_verify_otp(payload: VerifyOtpRequest):
 @app.post("/seller/products")
 def api_seller_upload_single(
     file: UploadFile = File(...),
+    caption: str = Form(...),
     price: Optional[int] = Form(None),
     seller=Depends(get_seller_client),
 ):
@@ -442,7 +420,8 @@ def api_seller_upload_single(
     image_path = _save_upload_to_tmp(file)
     try:
         final_price = price if price is not None else _random_price()
-        caption, _, db_parser = _parse_image(image_path)
+        caption_text = _validate_caption(caption)
+        _, db_parser = _parse_caption(os.path.basename(image_path), caption_text)
 
         product_id = create_pending_product(
             seller_client=client,
@@ -450,7 +429,7 @@ def api_seller_upload_single(
             image_local_path=image_path,
             price=final_price,
         )
-        caption_id = save_caption(client, product_id, caption)
+        caption_id = save_caption(client, product_id, caption_text, caption_source="manual")
         product_code = classify_and_update_product(client, product_id, caption_id, db_parser)
         result_id = _get_result_id(client, caption_id)
 
@@ -458,7 +437,7 @@ def api_seller_upload_single(
             "product_code": product_code,
             "product_id": product_id,
             "result_id": result_id,
-            "caption": caption,
+            "caption": caption_text,
             "type": db_parser["type"],
             "attributes": _display_attributes(db_parser),
             "status": "done",
@@ -466,37 +445,101 @@ def api_seller_upload_single(
     finally:
         os.remove(image_path)
 
+@app.put("/seller/products/{product_id}/caption")
+def api_seller_update_caption(
+    product_id: int,
+    payload: SellerRecaptionRequest,
+    seller=Depends(get_seller_client),
+):
+    client, seller_id = seller
+    caption_text = _validate_caption(payload.caption)
+    _, db_parser = _parse_caption(f"product-{product_id}", caption_text)
+
+    caption_id = save_caption(client, product_id, caption_text, caption_source="manual")
+    product_code = classify_and_update_product(client, product_id, caption_id, db_parser)
+    result_id = _get_result_id(client, caption_id)
+
+    return {
+        "product_code": product_code,
+        "result_id": result_id,
+        "caption": caption_text,
+        "type": db_parser["type"],
+        "attributes": _display_attributes(db_parser),
+    }
+
+def _load_caption_map(caption_file: UploadFile) -> dict[str, dict]:
+    filename = caption_file.filename or ""
+    content = caption_file.file.read()
+
+    if filename.endswith((".xlsx", ".xls")):
+        df = pd.read_excel(io.BytesIO(content))
+        if not {"filename", "caption"}.issubset(df.columns):
+            raise HTTPException(400, "Excel file must have 'filename' and 'caption' columns.")
+        result = {}
+        for _, row in df.iterrows():
+            result[str(row["filename"]).strip()] = {
+                "caption": str(row["caption"]).strip(),
+                "price": int(row["price"]) if "price" in df.columns and pd.notna(row.get("price")) else None,
+            }
+        return result
+
+    elif filename.endswith(".json"):
+        data = json_lib.loads(content)
+        result = {}
+        for item in data:
+            if "filename" not in item or "caption" not in item:
+                raise HTTPException(400, "Each JSON entry must have 'filename' and 'caption'.")
+            result[item["filename"].strip()] = {
+                "caption": item["caption"].strip(),
+                "price": item.get("price"),
+            }
+        return result
+
+    raise HTTPException(400, "Only .xlsx or .json files are supported.")
+
 
 @app.post("/seller/products/batch")
 def api_seller_upload_batch(
     files: list[UploadFile] = File(...),
+    caption_file: UploadFile = File(...),
     seller=Depends(get_seller_client),
 ):
     client, seller_id = seller
     if len(files) > 20:
-        raise HTTPException(400, "Chỉ được upload tối đa 20 ảnh mỗi lần.")
+        raise HTTPException(400, "Maximum 20 images allowed per upload.")
+
+    caption_map = _load_caption_map(caption_file)
+    caption_source = "batch_excel" if caption_file.filename.endswith((".xlsx", ".xls")) else "batch_json"
+
+    missing = [f.filename for f in files if f.filename not in caption_map]
+    if missing:
+        raise HTTPException(400, f"No caption found for: {', '.join(missing)}")
 
     results = []
     ok_count = 0
-    for index, upload in enumerate(files, start=1):
+    for upload in files:
         image_path = _save_upload_to_tmp(upload)
         try:
-            price = _random_price()
-            caption, _, db_parser = _parse_image(image_path)
+            entry = caption_map[upload.filename]
+            caption_text = _validate_caption(entry["caption"])
+            price = entry["price"] if entry["price"] is not None else _random_price()
+
+            _, db_parser = _parse_caption(os.path.basename(image_path), caption_text)
             product_id = create_pending_product(
                 seller_client=client,
                 seller_id=seller_id,
                 image_local_path=image_path,
                 price=price,
             )
-            caption_id = save_caption(client, product_id, caption)
+            caption_id = save_caption(client, product_id, caption_text, caption_source=caption_source)
             product_code = classify_and_update_product(client, product_id, caption_id, db_parser)
             result_id = _get_result_id(client, caption_id)
             results.append({
+                "filename": upload.filename,
                 "product_code": product_code,
                 "product_id": product_id,
                 "result_id": result_id,
-                "caption": caption,
+                "caption": caption_text,
                 "type": db_parser["type"],
                 "attributes": _display_attributes(db_parser),
                 "status": "done",
@@ -504,6 +547,7 @@ def api_seller_upload_batch(
             ok_count += 1
         except Exception as exc:
             results.append({
+                "filename": upload.filename,
                 "product_code": None, "product_id": None, "result_id": None, "caption": None,
                 "type": None, "attributes": None, "status": f"failed: {exc}",
             })
@@ -519,50 +563,18 @@ def api_seller_list_products(seller=Depends(get_seller_client)):
     products = get_seller_products(client, seller_id)  # đã filter đúng theo seller_id, không lộ sản phẩm seller khác
     return {"count": len(products or []), "products": [_product_to_json(p) for p in (products or [])]}
 
-
-class SellerCorrectionRequest(BaseModel):
-    result_id: int
-    corrected_category: str
-    # SỬA #3 (theo yêu cầu): cho phép sửa cả màu/chất liệu/họa tiết,
-    # không chỉ riêng type như trước.
-    corrected_color: Optional[str] = None
-    corrected_material: Optional[str] = None
-    corrected_pattern: Optional[str] = None
-
-
-@app.post("/seller/corrections")
-def api_seller_submit_correction(payload: SellerCorrectionRequest, seller=Depends(get_seller_client)):
-    client, _seller_id = seller
-    # Giữ nguyên hành vi cũ cho category/type (có thể có side-effect logging
-    # riêng bên trong submit_seller_correction mà main.py không biết tới).
-    submit_seller_correction(client, payload.result_id, payload.corrected_category)
-
-    # Với color/material/pattern: convert tên hiển thị -> code rồi update
-    # thẳng vào classification_results, vì submit_seller_correction hiện tại
-    # chỉ nhận corrected_category.
-    extra_updates = {}
-    if payload.corrected_color:
-        code = map_value_to_code(payload.corrected_color, "color_code", "color_name", "color_code")
-        if code and code != "X":
-            extra_updates["color_code"] = code
-    if payload.corrected_material:
-        code = map_value_to_code(payload.corrected_material, "material_code", "material_name", "material_code")
-        if code and code != "X":
-            extra_updates["material_code"] = code
-    if payload.corrected_pattern:
-        code = map_value_to_code(payload.corrected_pattern, "pattern_code", "pattern_name", "pattern_code")
-        if code and code != "X":
-            extra_updates["pattern_code"] = code
-
-    if extra_updates:
-        # Giả định cột khóa chính của classification_results là "result_id"
-        # (khớp với _get_result_id ở trên) — đổi lại nếu schema thật khác.
-        client.table("classification_results").update(extra_updates).eq(
-            "result_id", payload.result_id
-        ).execute()
-
-    return {"status": "ok"}
-
+@app.post("/seller/suggest-caption")
+def api_seller_suggest_caption(
+    file: UploadFile = File(...),
+    seller=Depends(get_seller_client),
+):
+    """Model sinh caption gợi ý — seller có thể dùng làm điểm khởi đầu rồi tự sửa."""
+    image_path = _save_upload_to_tmp(file)
+    try:
+        caption = generate_caption(image_path)
+        return {"suggested_caption": caption}
+    finally:
+        os.remove(image_path)
 
 # ---------------------------------------------------------------------------
 # Buyer endpoints
@@ -593,6 +605,8 @@ def api_buyer_search_image(
     price_min: Optional[int] = Form(None),  # SỬA #3
     price_max: Optional[int] = Form(None),  # SỬA #3
 ):
+    if len(dimensions) == 1 and "," in dimensions[0]:
+        dimensions = [d.strip() for d in dimensions[0].split(",") if d.strip()]
     device_id = device_id or str(uuid.uuid4())
     image_path = _save_upload_to_tmp(file)
     try:
