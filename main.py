@@ -20,7 +20,14 @@ from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Depe
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from auth_utils import get_authenticated_client, send_otp, verify_otp
+USE_MOCK_AUTH = os.getenv("USE_MOCK_AUTH", "false").lower() == "true"
+
+if USE_MOCK_AUTH:
+    from auth_utils_2 import get_authenticated_client, send_otp, verify_otp
+else:
+    from auth_utils import get_authenticated_client, send_otp, verify_otp
+#from auth_utils import get_authenticated_client, send_otp, verify_otp
+
 from classify_utils import (
     ATTRIBUTE_KEYWORDS,
     GLOBAL_ATTRIBUTES,
