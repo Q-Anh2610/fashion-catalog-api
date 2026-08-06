@@ -39,37 +39,48 @@ def map_value_to_code(value: str, code_type: str) -> str:
     return _codebook_cache.get(code_type, {}).get(value, "X")
 
 
-def get_next_sequence_number(type_code: str, color_code: str, material_code: str, pattern_code: str) -> int:
+def get_next_sequence_number(type_code: str, material_code: str) -> int:
     """
-    Đếm số sản phẩm đã có ĐÚNG tổ hợp type+color+material+pattern (kể cả khi có X),
-    trả về số thứ tự tiếp theo. Query qua classification_results vì đó là nơi lưu 4 mã này.
+    Đếm số sản phẩm đã có ĐÚNG tổ hợp type+material (kể cả khi có X),
+    trả về số thứ tự tiếp theo.
     """
     res = supabase.table("classification_results") \
         .select("result_id", count="exact") \
         .eq("type_code", type_code) \
-        .eq("color_code", color_code) \
         .eq("material_code", material_code) \
-        .eq("pattern_code", pattern_code) \
         .execute()
     return (res.count or 0) + 1
 
 
 def map_codes_only(parser_result: dict) -> dict:
     global_attrs = parser_result["attributes"]["global"]
+
+    type_code = map_value_to_code(parser_result["type"], "type")
+    material_code = map_value_to_code(global_attrs.get("material"), "material")
+
+    color_codes = sorted({
+        c for c in (map_value_to_code(v, "color") for v in global_attrs.get("color", []))
+        if c and c != "X"
+    })
+    pattern_codes = sorted({
+        c for c in (map_value_to_code(v, "pattern") for v in global_attrs.get("pattern", []))
+        if c and c != "X"
+    })
+
     return {
-        "type_code": map_value_to_code(parser_result["type"], "type"),
-        "color_code": map_value_to_code(global_attrs.get("color"), "color"),
-        "material_code": map_value_to_code(global_attrs.get("material"), "material"),
-        "pattern_code": map_value_to_code(global_attrs.get("pattern"), "pattern"),
+        "type_code": type_code,
+        "material_code": material_code,
+        "color_codes": color_codes,
+        "pattern_codes": pattern_codes,
     }
 
 
 def build_product_code(parser_result: dict) -> tuple[str, dict]:
     codes = map_codes_only(parser_result)
-    seq = get_next_sequence_number(**codes)
-    product_code = f"{codes['type_code']}{codes['color_code']}{codes['material_code']}{codes['pattern_code']}{seq:03d}"
+    seq = get_next_sequence_number(codes["type_code"], codes["material_code"])
+    # [TYPE:1][MATERIAL:1][SEQ:4] = 6 ký tự, không còn color/pattern trong code
+    product_code = f"{codes['type_code']}{codes['material_code']}{seq:04d}"
     return product_code, codes
-
 
 # ======================================================================
 # LUỒNG NGƯỜI BÁN (cần seller_client đã xác thực OTP, seller_id từ auth_utils.py)
@@ -122,31 +133,42 @@ def save_caption(seller_client, product_id: int, caption_text: str, caption_sour
 def classify_and_update_product(seller_client, product_id: int, caption_id: int, parser_result: dict) -> str:
     """
     Bước 3-5: build product_code -> insert classification_results
+              -> insert classification_result_attribute (color/pattern, multi-value)
               -> insert attribute_<type> -> UPDATE product.
     Trả về product_code đã sinh.
     """
     product_code, codes = build_product_code(parser_result)
 
-    # Insert classification_results
-    seller_client.table("classification_results").insert({
+    # Insert classification_results — không còn color_code/pattern_code
+    result = seller_client.table("classification_results").insert({
         "product_id": product_id,
         "caption_id": caption_id,
         "type_code": codes["type_code"],
-        "color_code": codes["color_code"],
         "material_code": codes["material_code"],
-        "pattern_code": codes["pattern_code"],
         "is_ambiguous": parser_result["ambiguous"],
     }).execute()
+    result_id = result.data[0]["result_id"]
+
+    # Insert color/pattern (multi-value) vào bảng junction
+    attribute_rows = [
+        {"result_id": result_id, "code_type": "color", "code": c}
+        for c in codes["color_codes"]
+    ] + [
+        {"result_id": result_id, "code_type": "pattern", "code": c}
+        for c in codes["pattern_codes"]
+    ]
+    if attribute_rows:
+        seller_client.table("classification_result_attribute").insert(attribute_rows).execute()
 
     # Insert vào đúng bảng attribute_<type>, nếu type xác định được
     item_type = parser_result["type"]
     if item_type != "unknown":
         table_name = f"attribute_{item_type}"
         specific_attrs = parser_result["attributes"]["type_specific"]
-        seller_client.table(table_name).upsert({
-            "product_id": product_id,
-            **specific_attrs,
-        }).on_conflict="product_id".execute()
+        seller_client.table(table_name).upsert(
+            {"product_id": product_id, **specific_attrs},
+            on_conflict="product_id",
+        ).execute()
 
     # UPDATE product với product_code, đổi status
     seller_client.table("product").update({
@@ -158,9 +180,9 @@ def classify_and_update_product(seller_client, product_id: int, caption_id: int,
 
 
 def get_seller_products(seller_client, seller_id: str):
-    """Lấy danh sách sản phẩm của 1 người bán, kèm caption + kết quả phân loại."""
+    """Lấy danh sách sản phẩm của 1 người bán, kèm caption + kết quả phân loại + color/pattern."""
     res = seller_client.table("product") \
-        .select("*, caption(*), classification_results(*)") \
+        .select("*, caption(*), classification_results(*, classification_result_attribute(code_type, code))") \
         .eq("seller_id", seller_id) \
         .order("uploaded_at", desc=True) \
         .execute()
@@ -192,7 +214,7 @@ def search_products_by_text(device_id: str, query_text: str, filters: dict = Non
     ensure_device_exists(device_id)
 
     query = supabase.table("caption") \
-        .select("caption_text, product(*, classification_results(*))") \
+        .select("caption_text, product(*, classification_results(*, classification_result_attribute(code_type, code)))") \
         .ilike("caption_text", f"%{query_text}%")
     res = query.execute()
 
@@ -201,16 +223,31 @@ def search_products_by_text(device_id: str, query_text: str, filters: dict = Non
         product = r.get("product")
         if not product:
             continue
-        product["caption"] = [{"caption_text": r["caption_text"]}]  # gắn để khớp _product_result_rows
+        product["caption"] = [{"caption_text": r["caption_text"]}]
         rows.append(product)
 
     if filters:
         def matches(row):
-            cls = row.get("classification_results") or []
-            if not cls:
+            cls_list = row.get("classification_results") or []
+            if not cls_list:
                 return False
-            c = cls[0]
-            return all(c.get(k) == v for k, v in filters.items())
+            c = cls_list[0]
+            attr_rows = c.get("classification_result_attribute") or []
+            colors = {a["code"] for a in attr_rows if a["code_type"] == "color"}
+            patterns = {a["code"] for a in attr_rows if a["code_type"] == "pattern"}
+
+            for key, value in filters.items():
+                if key == "color_code":
+                    if value not in colors:
+                        return False
+                elif key == "pattern_code":
+                    if value not in patterns:
+                        return False
+                else:
+                    if c.get(key) != value:
+                        return False
+            return True
+
         rows = [r for r in rows if matches(r)]
 
     result_product_ids = [r["product_id"] for r in rows]
@@ -222,41 +259,43 @@ def search_products_by_text(device_id: str, query_text: str, filters: dict = Non
 
     return rows
 
-
 def search_products_by_image(device_id: str, query_image_local_path: str,
                               generated_caption: str, parser_result: dict,
                               similarity_dimensions: list[str] = None):
-    """
-    Tìm sản phẩm tương đồng theo ảnh. similarity_dimensions là subset của
-    ["type", "color", "material", "pattern"] — có thể chọn 0 đến 4 mức,
-    không cần liên tục/theo thứ tự (VD chỉ chọn ["material", "pattern"] vẫn được).
-    Nếu để trống -> trả về tất cả (không lọc theo attribute nào).
-    """
     ensure_device_exists(device_id)
     similarity_dimensions = similarity_dimensions or []
 
-    # Upload ảnh tìm kiếm vào bucket riêng buyers-uploads
     remote_filename = f"{uuid.uuid4()}.jpg"
     with open(query_image_local_path, "rb") as f:
         supabase.storage.from_("buyers-uploads").upload(remote_filename, f)
 
-    # Build mã từ ảnh vừa upload (dùng chung hàm build_product_code)
     codes = map_codes_only(parser_result)
 
-    dimension_to_code_column = {
-        "type": "type_code",
-        "color": "color_code",
-        "material": "material_code",
-        "pattern": "pattern_code",
-    }
+    query = supabase.table("classification_results") \
+        .select("product_id, product(*), classification_result_attribute(code_type, code)")
 
-    query = supabase.table("classification_results").select("product_id, product(*)")
-    for dim in similarity_dimensions:
-        col = dimension_to_code_column[dim]
-        query = query.eq(col, codes[col])
+    if "type" in similarity_dimensions:
+        query = query.eq("type_code", codes["type_code"])
+    if "material" in similarity_dimensions:
+        query = query.eq("material_code", codes["material_code"])
+
     res = query.execute()
 
-    result_product_ids = [row["product_id"] for row in res.data]
+    rows = res.data or []
+    if "color" in similarity_dimensions:
+        targets = set(codes["color_codes"])
+        rows = [
+            r for r in rows
+            if targets & {a["code"] for a in (r.get("classification_result_attribute") or []) if a["code_type"] == "color"}
+        ]
+    if "pattern" in similarity_dimensions:
+        targets = set(codes["pattern_codes"])
+        rows = [
+            r for r in rows
+            if targets & {a["code"] for a in (r.get("classification_result_attribute") or []) if a["code_type"] == "pattern"}
+        ]
+
+    result_product_ids = [row["product_id"] for row in rows]
 
     supabase.table("search_by_image").insert({
         "device_id": device_id,
@@ -266,4 +305,4 @@ def search_products_by_image(device_id: str, query_image_local_path: str,
         "result_product_ids": result_product_ids,
     }).execute()
 
-    return [row["product"] for row in res.data]
+    return [row["product"] for row in rows]
