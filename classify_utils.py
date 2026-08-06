@@ -193,6 +193,8 @@ DEFAULT_ATTRIBUTE_KEYWORDS = {
 
 DEFAULT_GLOBAL_ATTRIBUTES = ["color", "material", "pattern"]
 
+MULTI_VALUE_GLOBAL_ATTRIBUTES = {"color", "pattern"}
+
 DEFAULT_TYPE_SPECIFIC_ATTRIBUTES = {
     "dress": ["neckline", "sleeve", "length", "waist", "closure", "detail", "style"],
     "top": ["neckline", "sleeve", "fit", "closure", "detail", "style"],
@@ -458,4 +460,3 @@ def parse_caption(
         result["n_segments"] = len(segments)
 
     return result
- 
