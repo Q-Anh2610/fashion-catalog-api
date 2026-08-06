@@ -25,6 +25,7 @@ from classify_utils import (
     ATTRIBUTE_KEYWORDS,
     GLOBAL_ATTRIBUTES,
     TYPE_SPECIFIC_ATTRIBUTES,
+    MULTI_VALUE_GLOBAL_ATTRIBUTES,
     parse_caption,
 )
 from db_utils import (
@@ -86,6 +87,10 @@ def _first_value(value):
         return value[0] if value else None
     return value or None
 
+def _all_values(value):
+    if isinstance(value, list):
+        return [v for v in value if v]
+    return [value] if value else []
 
 def _format_parser_for_db(parsed: dict[str, Any]) -> dict[str, Any]:
     item_type = parsed.get("type", "unknown")
@@ -94,7 +99,10 @@ def _format_parser_for_db(parsed: dict[str, Any]) -> dict[str, Any]:
         value = parsed.get("global_attributes", {}).get(attr)
         if value is None:
             value = parsed.get("attributes", {}).get(attr)
-        global_values[attr] = _first_value(value)
+        if attr in MULTI_VALUE_GLOBAL_ATTRIBUTES:
+            global_values[attr] = _all_values(value)      # color, pattern -> list
+        else:
+            global_values[attr] = _first_value(value)      # material -> 1 giá trị
 
     type_values = {}
     for attr in TYPE_SPECIFIC_ATTRIBUTES.get(item_type, []):
@@ -121,10 +129,15 @@ def _display_attributes(db_parser: dict[str, Any]) -> str:
     attrs = {}
     attrs.update(db_parser["attributes"]["global"])
     attrs.update(db_parser["attributes"]["type_specific"])
-    visible = {key: value for key, value in attrs.items() if value}
-    if not visible:
-        return ""
-    return ", ".join(f"{key}: {value}" for key, value in visible.items())
+
+    parts = []
+    for key, value in attrs.items():
+        if isinstance(value, list):
+            if value:
+                parts.append(f"{key}: {', '.join(value)}")
+        elif value:
+            parts.append(f"{key}: {value}")
+    return ", ".join(parts)
 
 
 def _parse_image(image_path: str) -> tuple[str, dict[str, Any], dict[str, Any]]:
@@ -172,18 +185,22 @@ def _code_filters(type_filter, color_filter, material_filter, pattern_filter):
         filters["pattern_code"] = map_value_to_code(pattern_filter, "pattern")
     return {key: value for key, value in filters.items() if value and value != "X"}
 
-def _target_codes(db_parser: dict[str, Any]) -> dict[str, str]:
+def _target_codes(db_parser: dict[str, Any]) -> dict[str, Any]:
     global_attrs = db_parser["attributes"]["global"]
     return {
         "type_code": map_value_to_code(db_parser["type"], "type"),
-        "color_code": map_value_to_code(global_attrs.get("color"), "color"),
         "material_code": map_value_to_code(global_attrs.get("material"), "material"),
-        "pattern_code": map_value_to_code(global_attrs.get("pattern"), "pattern"),
+        "color_codes": [map_value_to_code(v, "color") for v in global_attrs.get("color", [])],
+        "pattern_codes": [map_value_to_code(v, "pattern") for v in global_attrs.get("pattern", [])],
     }
 
 def _product_to_json(product: dict, score=None) -> dict:
     cls_rows = product.get("classification_results") or []
     cls = cls_rows[0] if isinstance(cls_rows, list) and cls_rows else {}
+    attr_rows = cls.get("classification_result_attribute") or []
+    color_codes = sorted({a["code"] for a in attr_rows if a["code_type"] == "color"})
+    pattern_codes = sorted({a["code"] for a in attr_rows if a["code_type"] == "pattern"})
+
     caption_rows = product.get("caption") or []
     caption = ""
     if isinstance(caption_rows, list) and caption_rows:
@@ -196,12 +213,11 @@ def _product_to_json(product: dict, score=None) -> dict:
         "price": product.get("price"),
         "caption": caption,
         "type_code": cls.get("type_code", ""),
-        "color_code": cls.get("color_code", ""),
         "material_code": cls.get("material_code", ""),
-        "pattern_code": cls.get("pattern_code", ""),
+        "color_codes": color_codes,
+        "pattern_codes": pattern_codes,
         "image_path": _public_image_url(product.get("image_path", "")),
     }
-
 
 def _random_price() -> int:
     """Random giá trong khoảng 100_000 - 500_000, luôn là bội số của 1000 (3 số cuối = 000)."""
@@ -267,26 +283,42 @@ def _search_products_by_image_soft(image_path, generated_caption, db_parser, dim
         remote_filename = ""
 
     codes = _target_codes(db_parser)
-    dimension_to_code_column = {
-        "type": "type_code", "color": "color_code", "material": "material_code", "pattern": "pattern_code",
-    }
 
-    res = supabase.table("classification_results").select("*, product(*)").execute()
+    res = supabase.table("classification_results") \
+        .select("*, product(*), classification_result_attribute(code_type, code)") \
+        .execute()
+
     scored = []
     for row in res.data or []:
         product = row.get("product")
         if not product:
             continue
 
+        attr_rows = row.get("classification_result_attribute") or []
+        row_colors = {a["code"] for a in attr_rows if a["code_type"] == "color"}
+        row_patterns = {a["code"] for a in attr_rows if a["code_type"] == "pattern"}
+
         if not dimensions:
             score, matched = 0, []
         else:
             matched = []
             for dim in dimensions:
-                col = dimension_to_code_column[dim]
-                target = codes.get(col)
-                if target and target != "X" and row.get(col) == target:
-                    matched.append(dim)
+                if dim == "type":
+                    target = codes.get("type_code")
+                    if target and target != "X" and row.get("type_code") == target:
+                        matched.append(dim)
+                elif dim == "material":
+                    target = codes.get("material_code")
+                    if target and target != "X" and row.get("material_code") == target:
+                        matched.append(dim)
+                elif dim == "color":
+                    targets = {c for c in codes.get("color_codes", []) if c and c != "X"}
+                    if targets and (targets & row_colors):
+                        matched.append(dim)
+                elif dim == "pattern":
+                    targets = {c for c in codes.get("pattern_codes", []) if c and c != "X"}
+                    if targets and (targets & row_patterns):
+                        matched.append(dim)
             score = len(matched) / len(dimensions)
             if score == 0:
                 continue
@@ -314,7 +346,6 @@ def _search_products_by_image_soft(image_path, generated_caption, db_parser, dim
         scores[pid] = "all" if not dimensions else f"{score:.0%} ({', '.join(matched)})"
         products.append(product)
     return products, scores
-
 
 # ---------------------------------------------------------------------------
 # Auth dependency — Flutter gửi lại access_token + seller_id sau khi verify OTP
