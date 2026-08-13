@@ -13,6 +13,8 @@ from PIL import Image
 from torch import nn
 from transformers import BlipForConditionalGeneration, BlipProcessor
 
+torch.set_num_threads(1)
+torch.set_grad_enabled(False)  # đảm bảo không build autograd graph ở đâu cả
 
 load_dotenv()
 USE_MOCK_MODEL = os.getenv("USE_MOCK_MODEL", "false").lower() == "true"
