@@ -12,6 +12,7 @@ import os
 import shutil
 import tempfile
 import uuid
+import torch
 import json as json_lib
 import pandas as pd
 from typing import Any, Optional
@@ -19,6 +20,7 @@ from typing import Any, Optional
 from fastapi import FastAPI, UploadFile, File, Form, Header, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
+from transformers import CLIPModel, CLIPProcessor
 
 USE_MOCK_AUTH = os.getenv("USE_MOCK_AUTH", "false").lower() == "true"
 
@@ -55,6 +57,11 @@ from model_utils_2 import generate_caption
 
 app = FastAPI(title="Fashion Catalog API")
 
+USE_MOCK_CLIP = os.getenv("USE_MOCK_CLIP", "false").lower() == "true"
+
+_clip_model = None
+_clip_processor = None
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],  # DEV ONLY — khi deploy production nên giới hạn domain Flutter Web thật
@@ -65,7 +72,32 @@ app.add_middleware(
 @app.on_event("startup")
 def startup_event():
     load_codebook_cache()
-    
+    if not USE_MOCK_CLIP:
+        global _clip_model, _clip_processor
+        from transformers import CLIPModel, CLIPProcessor
+        _clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32")
+        _clip_processor = CLIPProcessor.from_pretrained("openai/clip-vit-base-patch32")
+        _clip_model.eval()
+
+def get_image_embedding(image_path: str) -> list[float]:
+    if USE_MOCK_CLIP:
+        # Vector giả nhưng deterministic theo nội dung file -> cùng ảnh luôn ra cùng vector,
+        # đủ để test logic sort/cosine mà không cần load model thật (tránh OOM trên Render free tier).
+        import hashlib, random
+        with open(image_path, "rb") as f:
+            file_hash = hashlib.md5(f.read()).hexdigest()
+        rng = random.Random(file_hash)
+        vec = [rng.uniform(-1, 1) for _ in range(512)]
+        norm = sum(v * v for v in vec) ** 0.5
+        return [v / norm for v in vec]
+
+    from PIL import Image
+    image = Image.open(image_path).convert("RGB")
+    inputs = _clip_processor(images=image, return_tensors="pt")
+    with torch.no_grad():
+        features = _clip_model.get_image_features(**inputs)
+    features = features / features.norm(p=2, dim=-1, keepdim=True)  # normalize để cosine = dot product
+    return features[0].tolist()
 
 TYPE_CHOICES = ["dress", "jacket", "skirt", "pants", "top"]
 SIMILARITY_DIMENSIONS = ["type", "color", "material", "pattern"]
@@ -289,6 +321,8 @@ def _search_products_by_image_soft(image_path, generated_caption, db_parser, dim
     except Exception:
         remote_filename = ""
 
+    query_embedding = get_image_embedding(image_path)
+
     codes = _target_codes(db_parser)
 
     res = supabase.table("classification_results") \
@@ -305,9 +339,7 @@ def _search_products_by_image_soft(image_path, generated_caption, db_parser, dim
         row_colors = {a["code"] for a in attr_rows if a["code_type"] == "color"}
         row_patterns = {a["code"] for a in attr_rows if a["code_type"] == "pattern"}
 
-        if not dimensions:
-            score, matched = 0, []
-        else:
+        if dimensions:
             matched = []
             for dim in dimensions:
                 if dim == "type":
@@ -326,9 +358,17 @@ def _search_products_by_image_soft(image_path, generated_caption, db_parser, dim
                     targets = {c for c in codes.get("pattern_codes", []) if c and c != "X"}
                     if targets and (targets & row_patterns):
                         matched.append(dim)
-            score = len(matched) / len(dimensions)
-            if score == 0:
-                continue
+            if not matched:
+                continue  # không khớp dimension nào -> loại khỏi tập ứng viên
+        else:
+            matched = []
+
+        prod_embedding = product.get("image_embedding")
+        if prod_embedding:
+            similarity = sum(a * b for a, b in zip(query_embedding, prod_embedding))
+            similarity = max(0.0, min(1.0, similarity))  # kẹp về [0, 1] cho an toàn hiển thị %
+        else:
+            similarity = 0.0
 
         product["classification_results"] = [row]
         scored.append((score, matched, product))
@@ -350,7 +390,7 @@ def _search_products_by_image_soft(image_path, generated_caption, db_parser, dim
     products, scores = [], {}
     for score, matched, product in scored:
         pid = product.get("product_id")
-        scores[pid] = "all" if not dimensions else f"{score:.0%} ({', '.join(matched)})"
+        scores[pid] = f"{score:.0%}"
         products.append(product)
     return products, scores
 
@@ -467,6 +507,10 @@ def api_seller_upload_single(
             image_local_path=image_path,
             price=final_price,
         )
+
+        embedding = get_image_embedding(image_path)
+        supabase.table("product").update({"image_embedding": embedding}).eq("product_id", product_id).execute()
+
         caption_id = save_caption(client, product_id, caption_text, caption_source="manual")
         product_code = classify_and_update_product(client, product_id, caption_id, db_parser)
         result_id = _get_result_id(client, caption_id)
@@ -569,6 +613,10 @@ def api_seller_upload_batch(
                 image_local_path=image_path,
                 price=price,
             )
+
+            embedding = get_image_embedding(image_path)
+            supabase.table("product").update({"image_embedding": embedding}).eq("product_id", product_id).execute()
+
             caption_id = save_caption(client, product_id, caption_text, caption_source=caption_source)
             product_code = classify_and_update_product(client, product_id, caption_id, db_parser)
             result_id = _get_result_id(client, caption_id)
