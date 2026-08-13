@@ -210,6 +210,8 @@ def _load_model():
     loaded_model = BlipForConditionalGeneration.from_pretrained(
         model_config.base_model_name,
         cache_dir=model_config.hf_cache_dir or None,
+        torch_dtype=torch.float32,      # giữ float32 cho an toàn với checkpoint đã train,
+        low_cpu_mem_usage=True,         # THÊM — giảm peak RAM lúc load weights
     )
     loaded_processor = BlipProcessor.from_pretrained(
         model_config.base_model_name,
@@ -228,6 +230,11 @@ def _load_model():
         print(f"Checkpoint missing {len(missing_keys)} model keys.")
     if unexpected_keys:
         print(f"Checkpoint has {len(unexpected_keys)} unexpected keys.")
+
+    # THÊM — giải phóng checkpoint dict ngay sau khi load xong, không cần giữ lại
+    del checkpoint, state_dict
+    import gc
+    gc.collect()
 
     loaded_model.to(device).eval()
     print("Model loaded.")
