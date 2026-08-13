@@ -371,7 +371,7 @@ def _search_products_by_image_soft(image_path, generated_caption, db_parser, dim
             similarity = 0.0
 
         product["classification_results"] = [row]
-        scored.append((score, matched, product))
+        scored.append((similarity, matched, product))
 
     scored.sort(key=lambda item: item[0], reverse=True)
     result_product_ids = [product.get("product_id") for _, _, product in scored]
