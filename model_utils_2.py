@@ -15,7 +15,7 @@ from transformers import BlipForConditionalGeneration, BlipProcessor
 
 
 load_dotenv()
-USE_MOCK_MODEL = os.getenv("USE_MOCK_MODEL", "false").lower() == "false"
+USE_MOCK_MODEL = os.getenv("USE_MOCK_MODEL", "false").lower() == "true"
 
 _MOCK_CAPTIONS = [
     "a black cotton dress with a floral pattern",
