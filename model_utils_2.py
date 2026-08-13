@@ -42,15 +42,18 @@ class ModelConfig:
     # Noi duy nhat can doi khi thay checkpoint student.
     student_checkpoint_repo_id: str = os.getenv(
         "STUDENT_CHECKPOINT_REPO_ID",
-        "QA12324/blip-kd-results-wsld-at-fashion200k-15k",
+        "quynhanh2610/demo-at-wsld-8",
+        # "QA12324/blip-kd-results-wsld-at-fashion200k-15k",
     )
     student_checkpoint_repo_type: str = os.getenv(
         "STUDENT_CHECKPOINT_REPO_TYPE",
-        "dataset",
+        "model",
+        # "dataset",
     )
     student_checkpoint_filename: str = os.getenv(
         "STUDENT_CHECKPOINT_FILENAME",
-        "kaggle_run_wsld_at/best_student_wsld_at.pth",
+        "best_student_wsld_at_quantized.pth",
+        # "kaggle_run_wsld_at/best_student_wsld_at.pth",
     )
 
     # Cac layer decoder duoc giu lai khi prune, phai khop ArchConfig.keep_decoder_layers.
@@ -221,6 +224,11 @@ def _load_model():
 
     _prune_decoder_layers(loaded_model, model_config.keep_decoder_layers)
 
+    loaded_model.eval()
+    loaded_model = torch.quantization.quantize_dynamic(
+        loaded_model, {nn.Linear}, dtype=torch.qint8
+    )
+
     checkpoint_path = _resolve_checkpoint_path(model_config)
     print(f"Loading checkpoint: {checkpoint_path}")
     checkpoint = torch.load(checkpoint_path, map_location="cpu")
@@ -230,13 +238,6 @@ def _load_model():
     missing_keys, unexpected_keys = loaded_model.load_state_dict(state_dict, strict=False)
     del state_dict
     import gc
-    gc.collect()
-
-    loaded_model.eval()
-    # Quantize sau khi load — giảm kích thước Linear layers ~4x, chạy tốt trên CPU
-    loaded_model = torch.quantization.quantize_dynamic(
-        loaded_model, {nn.Linear}, dtype=torch.qint8
-    )
     gc.collect()
     
     if missing_keys:
